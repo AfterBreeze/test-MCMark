@@ -1,4 +1,7 @@
-def pipeline(output_path, score_save_path, eps, model_str, dataset_name):
+def pipeline(
+    output_path, score_save_path, eps, model_str, dataset_name,
+    adamc_n_max=32, adamc_entropy_threshold=0.5,
+):
     # raise NotImplementedError
     from .common import set_spawn
 
@@ -45,6 +48,8 @@ def pipeline(output_path, score_save_path, eps, model_str, dataset_name):
                     "task_template": "{input}",
                     "max_length": 3072,
                 },
+                "adamc_n_max": adamc_n_max,
+                "adamc_entropy_threshold": adamc_entropy_threshold,
             },
         )
         for i in range(num_gpus)

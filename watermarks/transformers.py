@@ -16,6 +16,14 @@ from .dipmark import Dip_Reweight
 from .mcmark import MC_Reweight
 from .sta import STA_Reweight
 from .unigram import Unigram_Reweight
+from .adamc import (
+    AdaMC_Reweight,
+    AdaMC_WatermarkCode,
+    _compute_entropy,
+    check_token_in_channel,
+    extract_message_from_channel,
+    compute_weighted_pvalue,
+)
 import json
 
 
@@ -81,7 +89,30 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         ]
         mask = torch.tensor(mask, device=scores.device, dtype=torch.bool)
 
-        if isinstance(self.reweight, MC_Reweight):
+        if isinstance(self.reweight, AdaMC_Reweight):
+            # --- AdaMC: entropy-adaptive multi-bit embedding ---
+            # 1. Compute entropy for the current token distribution
+            cur_probs = torch.softmax(scores, dim=-1)              # [bsz, vocab_size]
+            entropy_vals = _compute_entropy(cur_probs)             # [bsz]
+            # Use the mean entropy across the batch to decide n_t
+            mean_H = entropy_vals.mean().item()
+            n_t = self.reweight.get_n_for_entropy(mean_H)
+
+            # 2. Build watermark code with message-derived channel index
+            watermark_code, new_cursor = AdaMC_WatermarkCode.from_message(
+                rng,
+                scores.size(1),
+                n_t=n_t,
+                message_bits=self.reweight.message_bits,
+                bit_cursor=self.reweight._bit_cursor,
+                private_key=self.reweight.private_key,
+                global_token_position=self.reweight._token_position,
+            )
+            # Advance state
+            self.reweight._bit_cursor = new_cursor
+            self.reweight._token_position += 1
+
+        elif isinstance(self.reweight, MC_Reweight):
             watermark_code = self.reweight.watermark_code_type.from_random(
                 rng, scores.size(1), self.reweight.n
             )
@@ -199,6 +230,94 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             else:
                 scores.append(0)
         return scores
+
+    def get_adamc_score(
+        self,
+        input_ids: LongTensor,
+        vocab_size: int,
+        current_token,
+        model_logits: FloatTensor,
+        global_token_position: int,
+    ):
+        """
+        AdaMC detection: for each token, determine n_t from entropy of model_logits,
+        reconstruct the message-derived channel index k_t, and check whether
+        current_token falls in channel k_t.
+
+        Args:
+            input_ids:            context token IDs, shape [bsz, ctx_len].
+            vocab_size:           vocabulary size.
+            current_token:        list of observed token IDs, length bsz.
+            model_logits:         raw logits from model at this position, [bsz, vocab_size].
+            global_token_position: absolute position index in the generated sequence.
+
+        Returns:
+            matches: list of int (0 or 1) per batch item.
+            n_t_list: list of int (n_t used) per batch item.
+            extracted_bits: list of list[int] (recovered message bits) per batch item.
+        """
+        assert isinstance(self.reweight, AdaMC_Reweight)
+
+        mask, seeds = self._get_codes(input_ids)
+        rng = [
+            torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
+        ]
+
+        # Compute per-token entropy
+        cur_probs = torch.softmax(model_logits, dim=-1)
+        entropy_vals = _compute_entropy(cur_probs)
+
+        bsz = input_ids.shape[0]
+        matches = []
+        n_t_list = []
+        extracted_bits_list = []
+
+        for b in range(bsz):
+            H_b = entropy_vals[b].item()
+            n_t = self.reweight.get_n_for_entropy(H_b)
+
+            # Reconstruct watermark code (only shuffle matters for detection)
+            shuffle_b = torch.randperm(vocab_size, generator=rng[b], device=input_ids.device)
+
+            if n_t <= 1:
+                # Skipped token: no match counted
+                matches.append(0)
+                n_t_list.append(1)
+                extracted_bits_list.append([])
+                continue
+
+            # Reconstruct split_k for detection (from message using same PRNG)
+            import math as _math
+            bits_needed = int(_math.log2(n_t))
+            from .adamc import _prng_mask_bits
+
+            msg_bits_slice = [
+                self.reweight.message_bits[(global_token_position * bits_needed + j) % len(self.reweight.message_bits)]
+                for j in range(bits_needed)
+            ]
+            prng = _prng_mask_bits(self.reweight.private_key, global_token_position + b, bits_needed)
+            masked = [msg_bits_slice[j] ^ prng[j] for j in range(bits_needed)]
+            k_t = sum(masked[j] << (bits_needed - 1 - j) for j in range(bits_needed)) % n_t
+
+            # Check if current_token[b] falls in channel k_t
+            token_id = current_token[b].item() if hasattr(current_token[b], 'item') else int(current_token[b])
+            in_channel = check_token_in_channel(token_id, shuffle_b, k_t, n_t, vocab_size)
+            matches.append(int(in_channel))
+            n_t_list.append(n_t)
+
+            # Extract message bits from the observed token
+            pos_in_shuffle = (shuffle_b == token_id).nonzero(as_tuple=True)[0]
+            if pos_in_shuffle.numel() > 0:
+                observed_pos = pos_in_shuffle[0].item()
+                observed_k = int(observed_pos * n_t / vocab_size)
+                e_bits = extract_message_from_channel(
+                    observed_k, n_t, self.reweight.private_key, global_token_position + b
+                )
+            else:
+                e_bits = []
+            extracted_bits_list.append(e_bits)
+
+        return matches, n_t_list, extracted_bits_list
 
 
 class WatermarkLogitsProcessor_Baseline(LogitsProcessor):

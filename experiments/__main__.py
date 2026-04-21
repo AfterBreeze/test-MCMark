@@ -2,7 +2,8 @@ import os
 
 
 def text_generation_undetectable_exp(
-    res_dir, eps, model_str, reweight_type, dataset_name, robustness_type
+    res_dir, eps, model_str, reweight_type, dataset_name, robustness_type,
+    adamc_n_max=32, adamc_entropy_threshold=0.5,
 ):
     from . import text_generation as tg
 
@@ -24,6 +25,8 @@ def text_generation_undetectable_exp(
                 model_str=model_str,
                 reweight_type=reweight_type,
                 dataset_name=dataset_name,
+                adamc_n_max=adamc_n_max,
+                adamc_entropy_threshold=adamc_entropy_threshold,
             )
         else:
             print(output_path, " exists! Job skipped.")
@@ -63,6 +66,8 @@ def text_generation_undetectable_exp(
         eps=eps,
         model_str=model_str,
         dataset_name=dataset_name,
+        adamc_n_max=adamc_n_max,
+        adamc_entropy_threshold=adamc_entropy_threshold,
     )
 
     print("finish text generation.")
@@ -75,10 +80,15 @@ def main():
 
     parser.add_argument("--model_str", type=str, help="Model path for text generation.")
     parser.add_argument(
-        "--reweight_type", type=str, choices=["mcmark_ablation", "main_exp", "mcmark"]
+        "--reweight_type", type=str, choices=["mcmark_ablation", "main_exp", "mcmark", "adamc", "adamc_ablation"]
     )
     parser.add_argument("--res_dir", type=str)
     parser.add_argument("--eps", type=float, default=0)
+    # AdaMC hyperparameters (only used when reweight_type is 'adamc')
+    parser.add_argument("--adamc_n_max", type=int, default=32,
+                        help="AdaMC: maximum channel count (power of 2). Default: 32")
+    parser.add_argument("--adamc_entropy_threshold", type=float, default=0.5,
+                        help="AdaMC: minimum entropy (nats) to apply watermarking. Default: 0.5")
     parser.add_argument(
         "--dataset_name",
         type=str,
@@ -111,6 +121,8 @@ def main():
         reweight_type=args.reweight_type,
         dataset_name=args.dataset_name,
         robustness_type=args.robustness_type,
+        adamc_n_max=args.adamc_n_max,
+        adamc_entropy_threshold=args.adamc_entropy_threshold,
     )
 
 

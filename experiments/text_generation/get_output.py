@@ -1,4 +1,7 @@
-def undetectable_exp_pipeline(output_path, model_str, reweight_type, dataset_name):
+def undetectable_exp_pipeline(
+    output_path, model_str, reweight_type, dataset_name,
+    adamc_n_max=32, adamc_entropy_threshold=0.5,
+):
     from .common import set_spawn
 
     set_spawn()
@@ -28,6 +31,8 @@ def undetectable_exp_pipeline(output_path, model_str, reweight_type, dataset_nam
             "dataset_name": dataset_name,
             "model_str": model_str,
             "batch_size": 1,
+            "adamc_n_max": adamc_n_max,
+            "adamc_entropy_threshold": adamc_entropy_threshold,
         },
     )
     gpu_workers = [

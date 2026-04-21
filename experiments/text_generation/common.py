@@ -1,4 +1,4 @@
-def get_wps(reweight_type, model_str):
+def get_wps(reweight_type, model_str, adamc_n_max=32, adamc_entropy_threshold=0.5):
     from watermarks import (
         WatermarkLogitsProcessor,
         PrevN_ContextCodeExtractor,
@@ -120,6 +120,36 @@ def get_wps(reweight_type, model_str):
         reweight_list = [MC_Reweight(n) for n in n_list[model_str]]
     elif reweight_type == "mcmark":
         reweight_list = [MC_Reweight(20)]
+    elif reweight_type == "adamc":
+        from watermarks import AdaMC_Reweight
+        # Default 32-bit message — in practice, replace with real user ID bytes
+        import hashlib
+        demo_msg = hashlib.sha256(b"demo_user_42").digest()[:4]   # 32 bits
+        reweight_list = [
+            AdaMC_Reweight(
+                n_max=adamc_n_max,
+                entropy_threshold=adamc_entropy_threshold,
+                message=demo_msg,
+                private_key=private_key,
+            )
+        ]
+    elif reweight_type == "adamc_ablation":
+        from watermarks import AdaMC_Reweight
+        import hashlib
+        demo_msg = hashlib.sha256(b"demo_user_42").digest()[:4]
+        # Ablation over entropy_threshold and n_max
+        ablation_configs = [
+            dict(n_max=32,  entropy_threshold=0.3),
+            dict(n_max=32,  entropy_threshold=0.5),
+            dict(n_max=32,  entropy_threshold=1.0),
+            dict(n_max=8,   entropy_threshold=0.5),
+            dict(n_max=16,  entropy_threshold=0.5),
+            dict(n_max=64,  entropy_threshold=0.5),
+        ]
+        reweight_list = [
+            AdaMC_Reweight(message=demo_msg, private_key=private_key, **cfg)
+            for cfg in ablation_configs
+        ]
     else:
         raise ValueError(f"Unknown reweight_type: {reweight_type}")
 
@@ -146,6 +176,12 @@ def get_wps(reweight_type, model_str):
             for delta in [0.5, 1.0, 1.5, 2.0]
         ]
         return [*wm_wps, *john_wps]
+    elif reweight_type in ("adamc", "adamc_ablation"):
+        # Reset AdaMC state for each watermark processor
+        for wp in wm_wps:
+            if hasattr(wp.reweight, "reset_state"):
+                wp.reweight.reset_state()
+        return [*wm_wps]
     else:
         return [*wm_wps]
 
@@ -158,13 +194,19 @@ def get_num_gpus():
 
 
 def batched_wp_task_worker(
-    tq, get_in_ds, reweight_type, dataset_name, model_str, batch_size=8
+    tq, get_in_ds, reweight_type, dataset_name, model_str, batch_size=8,
+    adamc_n_max=32, adamc_entropy_threshold=0.5,
 ):
     ds = get_in_ds(dataset_name=dataset_name)
 
     from .common import get_wps
 
-    wps = get_wps(reweight_type=reweight_type, model_str=model_str)
+    wps = get_wps(
+        reweight_type=reweight_type,
+        model_str=model_str,
+        adamc_n_max=adamc_n_max,
+        adamc_entropy_threshold=adamc_entropy_threshold,
+    )
 
     from tqdm import tqdm
 
@@ -351,6 +393,9 @@ def transformer_worker(
                     wp.reset_watermark_key(batch_size)
                 if "vocab_size" in dir(wp):
                     wp.vocab_size = model.config.vocab_size
+                # Reset AdaMC state before each generation
+                if hasattr(wp, "reweight") and hasattr(wp.reweight, "reset_state"):
+                    wp.reweight.reset_state()
 
                 lps.append(wp)
 
@@ -541,6 +586,66 @@ def get_split_res_id(vocab_size, output_ids, wp, device, eps=0, split_num=None):
     return scores, label_attention_mask
 
 
+# for AdaMC watermark (requires model forward pass to compute entropy)
+@torch.no_grad()
+def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0):
+    """
+    AdaMC detection scoring.
+
+    Unlike MCMark which only needs the watermark key, AdaMC requires the model
+    logits at each position (to determine n_t from entropy).  We perform a
+    single teacher-forcing forward pass through the model to obtain all logits
+    in one batch, which is efficient.
+
+    Args:
+        vocab_size:  vocabulary size.
+        output_ids:  token IDs of generated text, shape [1, T].
+        wp:          WatermarkLogitsProcessor with AdaMC_Reweight.
+        model:       the language model (used for teacher-forcing logits).
+        device:      torch device string.
+        eps:         random-token-replacement rate for robustness testing.
+
+    Returns:
+        match_flags: [1, T] int tensor (1 = matched channel, 0 = not or skipped).
+        n_t_tensor:  [1, T] int tensor (n_t used at each position, 1 = skipped).
+        all_extracted_bits: list[list[list[int]]] — extracted message bits per token.
+        label_attention_mask: [1, T] mask (same shape as output_ids).
+    """
+    assert eps <= 1
+    assert eps >= 0
+
+    decoder_input_ids = output_ids.to(device)
+    label_attention_mask = torch.ones_like(decoder_input_ids).to(device)
+
+    if eps > 0:
+        decoder_input_ids = random_paraphrase(
+            decoder_input_ids, vocab_size, device, eps
+        )
+
+    T = decoder_input_ids.size(1)
+    match_flags = torch.zeros(decoder_input_ids.shape, dtype=torch.int, device=device)
+    n_t_tensor  = torch.ones(decoder_input_ids.shape,  dtype=torch.int, device=device)
+    all_extracted_bits = [[] for _ in range(T)]
+
+    # One teacher-forcing forward pass: feed all tokens, get all logits at once
+    logits_all = model(decoder_input_ids).logits  # [1, T, vocab_size]
+
+    for i in range(T - 1):
+        pre          = decoder_input_ids[:, : i + 1]
+        cur_token    = decoder_input_ids[:, i + 1]    # [bsz]
+        model_logits = logits_all[:, i, :]             # [bsz, vocab_size] (logits at pos i)
+
+        matches, n_list, e_bits = wp.get_adamc_score(
+            pre, vocab_size, cur_token, model_logits,
+            global_token_position=i,
+        )
+        match_flags[0, i + 1] = matches[0]
+        n_t_tensor[0, i + 1]  = n_list[0]
+        all_extracted_bits[i + 1] = e_bits[0]
+
+    return match_flags, n_t_tensor, all_extracted_bits, label_attention_mask
+
+
 from ..lm_watermarking.watermark_processor import (
     WatermarkLogitsProcessor as WatermarkLogitsProcessor_John,
 )
@@ -581,6 +686,8 @@ def watermark_score_worker(
     decoder_only=False,
     eps=0,
     tokenization_kwargs={},
+    adamc_n_max=32,
+    adamc_entropy_threshold=0.5,
 ):
     from transformers import (
         AutoModelForSeq2SeqLM,
@@ -622,6 +729,7 @@ def watermark_score_worker(
         MC_Reweight,
         STA_Reweight,
         Unigram_Reweight,
+        AdaMC_Reweight,
     )
     from ..lm_watermarking.watermark_processor import (
         WatermarkLogitsProcessor as WatermarkLogitsProcessor_John,
@@ -641,7 +749,64 @@ def watermark_score_worker(
 
         output_ids = tbatch["output"]["input_ids"]
 
-        if "MC_Reweight" in wp_str:  # Mc-mark
+        if "AdaMC_Reweight" in wp_str:  # AdaMC multi-bit watermark
+            from transformers import AutoModelForCausalLM as _CausalLM
+            _adamc_model = _CausalLM.from_pretrained(oracle_model_str).to(device)
+            _adamc_model.eval()
+
+            wp = eval(wp_str)
+            wp.reset_watermark_key(len(batch["watermark_processor"]))
+            wp.ignore_history = True
+            if hasattr(wp.reweight, "reset_state"):
+                wp.reweight.reset_state()
+
+            from .common import get_adamc_score_id
+            (
+                match_flags,
+                n_t_tensor,
+                all_extracted_bits,
+                label_attention_mask,
+            ) = get_adamc_score_id(
+                vocab_size, output_ids, wp, _adamc_model, device, eps=eps
+            )
+            del _adamc_model
+            torch.cuda.empty_cache()
+
+            assert label_attention_mask.shape[0] == 1
+            label_attention_mask[0, :2] = 0
+
+            match_flags   = match_flags   * label_attention_mask
+            n_t_tensor    = n_t_tensor    * label_attention_mask
+
+            seq_len      = torch.sum(label_attention_mask, dim=-1, keepdim=False)
+            # Weighted score (sum of log2(n_t) * match for high-entropy tokens)
+            high_entropy_mask = (n_t_tensor > 1).float()
+            log2_n = torch.where(
+                n_t_tensor > 1,
+                torch.log2(n_t_tensor.float()),
+                torch.zeros_like(n_t_tensor, dtype=torch.float),
+            )
+            weighted_score = (log2_n * match_flags.float()).sum(dim=-1)
+            high_entropy_count = high_entropy_mask.sum(dim=-1)
+
+            # Collect bits for message extraction accuracy
+            flat_extracted = [
+                b for bits in all_extracted_bits for b in bits
+            ]
+
+            rq.put(
+                {
+                    **batch,
+                    "lens": seq_len.cpu().tolist(),
+                    "high_entropy_count": high_entropy_count.cpu().tolist(),
+                    "weighted_score": weighted_score.cpu().tolist(),
+                    "match_flags": match_flags[0].cpu().tolist(),
+                    "n_t_list": n_t_tensor[0].cpu().tolist(),
+                    "extracted_bits": flat_extracted,
+                }
+            )
+
+        elif "MC_Reweight" in wp_str:  # Mc-mark
             wp = eval(wp_str)
             wp.reset_watermark_key(len(batch["watermark_processor"]))
             wp.ignore_history = True
