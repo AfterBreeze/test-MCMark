@@ -62,6 +62,8 @@ def generate_result(score_path, save_path, fpr_thres, len_limit):
 
         if cur_len < len_limit:
             continue
+        if "AdaMC_Reweight" in wp:
+            continue
         if "MC_Reweight" not in wp:
             continue
 
