@@ -754,13 +754,41 @@ def watermark_score_worker(
             _adamc_model = _CausalLM.from_pretrained(oracle_model_str).to(device)
             _adamc_model.eval()
 
-            wp = eval(wp_str)
+            # eval(wp_str) reconstructs AdaMC_Reweight(n_max=..., entropy_threshold=...)
+            # message and private_key must be re-supplied (they are not in repr for security)
+            import hashlib as _hl
+            _demo_msg = _hl.sha256(b"demo_user_42").digest()[:4]
+            import random as _random
+            _random.seed(42)
+            _private_key = _random.getrandbits(1024).to_bytes(128, "big")
+
+            _reweight_obj = eval(wp_str)
+            _reweight_obj.message = _demo_msg
+            _reweight_obj.message_bits = list(_reweight_obj.__class__.__mro__)  # placeholder
+            from watermarks.adamc import _bytes_to_bits
+            _reweight_obj.message_bits = _bytes_to_bits(_demo_msg)
+            _reweight_obj.private_key = _private_key
+            _reweight_obj._bit_cursor = 0
+            _reweight_obj._token_position = 0
+
+            # Build a WatermarkLogitsProcessor wrapping the reconstructed reweight
+            from watermarks import (
+                WatermarkLogitsProcessor,
+                PrevN_ContextCodeExtractor,
+                NGramHashing,
+            )
+            import copy as _copy
+            _wm_key = NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=True)
+            wp = WatermarkLogitsProcessor(
+                private_key=_private_key,
+                reweight=_reweight_obj,
+                watermark_key_list=[_wm_key],
+            )
             wp.reset_watermark_key(len(batch["watermark_processor"]))
-            wp.ignore_history = True
-            if hasattr(wp.reweight, "reset_state"):
-                wp.reweight.reset_state()
 
             from .common import get_adamc_score_id
+            if hasattr(wp.reweight, "reset_state"):
+                wp.reweight.reset_state()
             (
                 match_flags,
                 n_t_tensor,

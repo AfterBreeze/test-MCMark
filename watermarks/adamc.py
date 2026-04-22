@@ -285,10 +285,12 @@ class AdaMC_Reweight(AbstractReweight):
         self._token_position = 0
 
     def __repr__(self) -> str:
+        # NOTE: this repr is used by eval() in watermark_score_worker to reconstruct
+        # the object for detection. Only n_max and entropy_threshold are needed there;
+        # message and private_key are re-supplied by the score worker.
         return (
             f"AdaMC_Reweight(n_max={self.n_max}, "
-            f"entropy_threshold={self.entropy_threshold}, "
-            f"message_len_bits={len(self.message_bits)})"
+            f"entropy_threshold={self.entropy_threshold})"
         )
 
     def get_n_for_entropy(self, H: float) -> int:
