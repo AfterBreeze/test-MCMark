@@ -89,7 +89,9 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         ]
         mask = torch.tensor(mask, device=scores.device, dtype=torch.bool)
 
-        if isinstance(self.reweight, AdaMC_Reweight):
+        reweight_cls = type(self.reweight).__name__
+
+        if reweight_cls == "AdaMC_Reweight":
             # --- AdaMC: entropy-adaptive multi-bit embedding ---
             # 1. Compute entropy for the current token distribution
             cur_probs = torch.softmax(scores, dim=-1)              # [bsz, vocab_size]
@@ -112,7 +114,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             self.reweight._bit_cursor = new_cursor
             self.reweight._token_position += 1
 
-        elif isinstance(self.reweight, MC_Reweight):
+        elif reweight_cls == "MC_Reweight":
             watermark_code = self.reweight.watermark_code_type.from_random(
                 rng, scores.size(1), self.reweight.n
             )
@@ -134,7 +136,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         rng = [
             torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
         ]
-        assert isinstance(self.reweight, Dip_Reweight)
+        assert type(self.reweight).__name__ == "Dip_Reweight"
         mask = torch.tensor(mask, device=input_ids.device)
         watermark_code = self.reweight.watermark_code_type.from_random(rng, vocab_size)
 
@@ -154,7 +156,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         rng = [
             torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
         ]
-        assert isinstance(self.reweight, STA_Reweight)
+        assert type(self.reweight).__name__ == "STA_Reweight"
         mask = torch.tensor(mask, device=input_ids.device)
         watermark_code = self.reweight.watermark_code_type.from_random(rng, vocab_size)
 
@@ -175,7 +177,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         rng = [
             torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
         ]
-        assert isinstance(self.reweight, Unigram_Reweight)
+        assert type(self.reweight).__name__ == "Unigram_Reweight"
         mask = torch.tensor(mask, device=input_ids.device)
         watermark_code = self.reweight.watermark_code_type.from_random(rng, vocab_size)
 
@@ -196,7 +198,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         rng = [
             torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
         ]
-        assert isinstance(self.reweight, MC_Reweight)
+        assert type(self.reweight).__name__ == "MC_Reweight"
         assert self.reweight.n == cur_n
         mask = torch.tensor(mask, device=input_ids.device)
         watermark_code = self.reweight.watermark_code_type.from_random(
@@ -256,7 +258,9 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             n_t_list: list of int (n_t used) per batch item.
             extracted_bits: list of list[int] (recovered message bits) per batch item.
         """
-        assert isinstance(self.reweight, AdaMC_Reweight)
+        assert type(self.reweight).__name__ == "AdaMC_Reweight", (
+            f"Expected AdaMC_Reweight, got {type(self.reweight).__name__}"
+        )
 
         mask, seeds = self._get_codes(input_ids)
         rng = [
