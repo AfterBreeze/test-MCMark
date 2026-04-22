@@ -808,15 +808,19 @@ def watermark_score_worker(
                 b for bits in all_extracted_bits for b in bits
             ]
 
+            # Serialize per-token sequences as JSON strings so that all values in
+            # the result dict have the same length (= batch_size = 1), which is
+            # required by simple_store_worker's length-consistency assertion.
+            import json as _json
             rq.put(
                 {
                     **batch,
                     "lens": seq_len.cpu().tolist(),
                     "high_entropy_count": high_entropy_count.cpu().tolist(),
                     "weighted_score": weighted_score.cpu().tolist(),
-                    "match_flags": match_flags[0].cpu().tolist(),
-                    "n_t_list": n_t_tensor[0].cpu().tolist(),
-                    "extracted_bits": flat_extracted,
+                    "match_flags": [_json.dumps(match_flags[0].cpu().tolist())],
+                    "n_t_list": [_json.dumps(n_t_tensor[0].cpu().tolist())],
+                    "extracted_bits": [_json.dumps(flat_extracted)],
                 }
             )
 

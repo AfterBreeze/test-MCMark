@@ -163,6 +163,14 @@ def generate_result(score_path, save_path, fpr_thres, len_limit, message_hex):
 
         match_flags = res.get("match_flags", [])
         n_t_list    = res.get("n_t_list",    [])
+        extracted   = res.get("extracted_bits", [])
+        # Fields are stored as JSON strings (to satisfy simple_store_worker constraints)
+        if isinstance(match_flags, str):
+            match_flags = json.loads(match_flags)
+        if isinstance(n_t_list, str):
+            n_t_list = json.loads(n_t_list)
+        if isinstance(extracted, str):
+            extracted = json.loads(extracted)
         # Trim leading zeros (first 2 tokens are masked)
         match_flags = [m for m, n in zip(match_flags, n_t_list) if n > 1]
         n_t_list    = [n for n in n_t_list if n > 1]
@@ -177,7 +185,7 @@ def generate_result(score_path, save_path, fpr_thres, len_limit, message_hex):
             tpr_cnt[wp] += 1
 
         # Multi-bit metrics
-        extracted = res.get("extracted_bits", [])
+        # (extracted already deserialized above)
         if len(extracted) > 0:
             ba = bit_accuracy(extracted, gt_bits)
             if ba is not None:
