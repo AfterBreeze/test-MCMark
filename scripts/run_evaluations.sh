@@ -1,6 +1,6 @@
 # score path for main experiments or robustness experiments
 # example: ./results/mmw_book_report/Llama_3.2_3B_Instruct/main_exp/score.txt
-score_path='./results/mmw_book_report/Llama_3.2_3B_Instruct/mcmark/score.txt'
+score_path='./results/mmw_book_report/Llama_3.2_3B_Instruct/adamc/score.txt'
 fpr=0.001
 
 # for baselines
