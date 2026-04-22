@@ -20,10 +20,6 @@ fpr=0.001
 # Ground-truth message (hex).
 # This must match the message embedded during generation.
 # Default demo: hashlib.sha256(b"demo_user_42").digest()[:4].hex()
-import_python=$(python -c "
-import hashlib
-print(hashlib.sha256(b'demo_user_42').digest()[:4].hex())
-")
 message_hex=$(python -c "import hashlib; print(hashlib.sha256(b'demo_user_42').digest()[:4].hex())")
 
 echo "========================================================"
