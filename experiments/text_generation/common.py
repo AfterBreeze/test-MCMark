@@ -588,7 +588,7 @@ def get_split_res_id(vocab_size, output_ids, wp, device, eps=0, split_num=None):
 
 # for AdaMC watermark (requires model forward pass to compute entropy)
 @torch.no_grad()
-def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0):
+def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0, prompt_ids=None):
     """
     AdaMC detection scoring.
 
@@ -597,13 +597,20 @@ def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0):
     single teacher-forcing forward pass through the model to obtain all logits
     in one batch, which is efficient.
 
+    IMPORTANT: prompt_ids must be provided so that the teacher-forcing forward
+    pass includes the full context (prompt + output), exactly matching what the
+    model saw during generation. Without prompt context, the logits (and thus
+    entropy / n_t) will differ from generation time.
+
     Args:
         vocab_size:  vocabulary size.
-        output_ids:  token IDs of generated text, shape [1, T].
+        output_ids:  token IDs of generated text ONLY (no prompt), shape [1, T].
         wp:          WatermarkLogitsProcessor with AdaMC_Reweight.
         model:       the language model (used for teacher-forcing logits).
         device:      torch device string.
         eps:         random-token-replacement rate for robustness testing.
+        prompt_ids:  token IDs of the prompt, shape [1, P]. If None, uses
+                     output_ids only (not recommended — will differ from generation).
 
     Returns:
         match_flags: [1, T] int tensor (1 = matched channel, 0 = not or skipped).
@@ -627,14 +634,37 @@ def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0):
     n_t_tensor  = torch.ones(decoder_input_ids.shape,  dtype=torch.int, device=device)
     all_extracted_bits = [[] for _ in range(T)]
 
-    # One teacher-forcing forward pass: feed all tokens, get all logits at once
-    logits_all = model(decoder_input_ids).logits  # [1, T, vocab_size]
+    # Teacher-forcing forward pass.
+    # We must include the prompt so that the model has the same context as during
+    # generation. The logits at position (P + i) predict the (i+1)-th output token.
+    if prompt_ids is not None:
+        prompt_ids = prompt_ids.to(device)
+        P = prompt_ids.size(1)
+        full_ids = torch.cat([prompt_ids, decoder_input_ids], dim=1)  # [1, P+T]
+    else:
+        P = 0
+        full_ids = decoder_input_ids  # [1, T]
+
+    logits_all = model(full_ids).logits  # [1, P+T, vocab_size]
+    # logits at position (P + i) predict token (P + i + 1) = output[i+1]
+    # so to predict output[i+1] we use logits_all[:, P+i, :]
 
     bit_cursor = 0  # cumulative message bit cursor, matches embedding
     for i in range(T - 1):
-        pre          = decoder_input_ids[:, : i + 1]
-        cur_token    = decoder_input_ids[:, i + 1]    # [bsz]
-        model_logits = logits_all[:, i, :]             # [bsz, vocab_size] (logits at pos i)
+        # context for seed: must match what generation saw.
+        # During generation of output[i+1], input_ids = prompt + output[0..i].
+        # PrevN_ContextCodeExtractor(n=2) takes the last 2 tokens.
+        # For i >= 2: last 2 = output[i-1], output[i]  (same as output-only prefix)
+        # For i < 2:  last 2 includes prompt tokens → use full prefix for accuracy
+        if prompt_ids is not None and i < 2:
+            # Use prompt tail + output prefix to get exact context
+            prompt_tail = prompt_ids[:, -(2 - i):]  # last (2-i) prompt tokens
+            pre = torch.cat([prompt_tail, decoder_input_ids[:, :i + 1]], dim=1)
+        else:
+            pre = decoder_input_ids[:, : i + 1]      # output [0..i]
+
+        cur_token    = decoder_input_ids[:, i + 1]        # output [i+1]
+        model_logits = logits_all[:, P + i, :]            # logits predicting output[i+1]
 
         matches, n_list, e_bits, bit_cursor = wp.get_adamc_score(
             pre, vocab_size, cur_token, model_logits,
@@ -777,13 +807,16 @@ def watermark_score_worker(
 
             if hasattr(wp.reweight, "reset_state"):
                 wp.reweight.reset_state()
+            # Pass prompt_ids so teacher-forcing uses the full context (prompt + output)
+            prompt_ids = tbatch["input"]["input_ids"]
             (
                 match_flags,
                 n_t_tensor,
                 all_extracted_bits,
                 label_attention_mask,
             ) = get_adamc_score_id(
-                vocab_size, output_ids, wp, adamc_model, device, eps=eps
+                vocab_size, output_ids, wp, adamc_model, device, eps=eps,
+                prompt_ids=prompt_ids,
             )
 
             assert label_attention_mask.shape[0] == 1
