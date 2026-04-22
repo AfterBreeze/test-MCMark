@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import torch
+import math
 from torch import FloatTensor, LongTensor
 from transformers import LogitsProcessor
 
@@ -240,6 +241,7 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         current_token,
         model_logits: FloatTensor,
         global_token_position: int,
+        bit_cursor: int = 0,
     ):
         """
         AdaMC detection: for each token, determine n_t from entropy of model_logits,
@@ -252,11 +254,13 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             current_token:        list of observed token IDs, length bsz.
             model_logits:         raw logits from model at this position, [bsz, vocab_size].
             global_token_position: absolute position index in the generated sequence.
+            bit_cursor:           current position in message_bits (cumulative, matches embed).
 
         Returns:
             matches: list of int (0 or 1) per batch item.
             n_t_list: list of int (n_t used) per batch item.
             extracted_bits: list of list[int] (recovered message bits) per batch item.
+            new_bit_cursor: updated bit cursor after consuming bits at this position.
         """
         assert type(self.reweight).__name__ == "AdaMC_Reweight", (
             f"Expected AdaMC_Reweight, got {type(self.reweight).__name__}"
@@ -295,8 +299,9 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             bits_needed = int(_math.log2(n_t))
             from .adamc import _prng_mask_bits
 
+            # Message index: use the cumulative bit_cursor (same logic as embedding)
             msg_bits_slice = [
-                self.reweight.message_bits[(global_token_position * bits_needed + j) % len(self.reweight.message_bits)]
+                self.reweight.message_bits[(bit_cursor + j) % len(self.reweight.message_bits)]
                 for j in range(bits_needed)
             ]
             prng = _prng_mask_bits(self.reweight.private_key, global_token_position + b, bits_needed)
@@ -321,7 +326,10 @@ class WatermarkLogitsProcessor(LogitsProcessor):
                 e_bits = []
             extracted_bits_list.append(e_bits)
 
-        return matches, n_t_list, extracted_bits_list
+        # Advance cursor by bits consumed at this position (use batch 0's n_t)
+        bits_consumed = int(math.log2(n_t_list[0])) if n_t_list and n_t_list[0] > 1 else 0
+        new_bit_cursor = bit_cursor + bits_consumed
+        return matches, n_t_list, extracted_bits_list, new_bit_cursor
 
 
 class WatermarkLogitsProcessor_Baseline(LogitsProcessor):

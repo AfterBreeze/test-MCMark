@@ -630,14 +630,16 @@ def get_adamc_score_id(vocab_size, output_ids, wp, model, device, eps=0):
     # One teacher-forcing forward pass: feed all tokens, get all logits at once
     logits_all = model(decoder_input_ids).logits  # [1, T, vocab_size]
 
+    bit_cursor = 0  # cumulative message bit cursor, matches embedding
     for i in range(T - 1):
         pre          = decoder_input_ids[:, : i + 1]
         cur_token    = decoder_input_ids[:, i + 1]    # [bsz]
         model_logits = logits_all[:, i, :]             # [bsz, vocab_size] (logits at pos i)
 
-        matches, n_list, e_bits = wp.get_adamc_score(
+        matches, n_list, e_bits, bit_cursor = wp.get_adamc_score(
             pre, vocab_size, cur_token, model_logits,
             global_token_position=i,
+            bit_cursor=bit_cursor,
         )
         match_flags[0, i + 1] = matches[0]
         n_t_tensor[0, i + 1]  = n_list[0]
@@ -709,7 +711,10 @@ def watermark_score_worker(
 
     tokenizer = AutoTokenizer.from_pretrained(oracle_model_str)
     vocab_size = model.config.vocab_size
-    del model
+    # Keep model alive for AdaMC (needs teacher-forcing logits).
+    # For non-AdaMC methods it is no longer used, so we keep it in memory
+    # but only use it when wp_str contains AdaMC_Reweight.
+    adamc_model = model  # alias; will be used in AdaMC branch below
 
     device = f"cuda:{gpu_id}"
 
@@ -750,43 +755,26 @@ def watermark_score_worker(
         output_ids = tbatch["output"]["input_ids"]
 
         if "AdaMC_Reweight" in wp_str:  # AdaMC multi-bit watermark
-            from transformers import AutoModelForCausalLM as _CausalLM
-            _adamc_model = _CausalLM.from_pretrained(oracle_model_str).to(device)
-            _adamc_model.eval()
-
-            # eval(wp_str) reconstructs AdaMC_Reweight(n_max=..., entropy_threshold=...)
-            # message and private_key must be re-supplied (they are not in repr for security)
+            # eval(wp_str) already reconstructs the full WatermarkLogitsProcessor.
+            # AdaMC_Reweight.__repr__ only outputs n_max and entropy_threshold,
+            # so we must patch message/private_key back onto wp.reweight afterward.
             import hashlib as _hl
             _demo_msg = _hl.sha256(b"demo_user_42").digest()[:4]
             import random as _random
             _random.seed(42)
             _private_key = _random.getrandbits(1024).to_bytes(128, "big")
 
-            _reweight_obj = eval(wp_str)
-            _reweight_obj.message = _demo_msg
-            _reweight_obj.message_bits = list(_reweight_obj.__class__.__mro__)  # placeholder
-            from watermarks.adamc import _bytes_to_bits
-            _reweight_obj.message_bits = _bytes_to_bits(_demo_msg)
-            _reweight_obj.private_key = _private_key
-            _reweight_obj._bit_cursor = 0
-            _reweight_obj._token_position = 0
-
-            # Build a WatermarkLogitsProcessor wrapping the reconstructed reweight
-            from watermarks import (
-                WatermarkLogitsProcessor,
-                PrevN_ContextCodeExtractor,
-                NGramHashing,
-            )
-            import copy as _copy
-            _wm_key = NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=True)
-            wp = WatermarkLogitsProcessor(
-                private_key=_private_key,
-                reweight=_reweight_obj,
-                watermark_key_list=[_wm_key],
-            )
+            wp = eval(wp_str)
             wp.reset_watermark_key(len(batch["watermark_processor"]))
 
-            from .common import get_adamc_score_id
+            # Patch AdaMC_Reweight state (message/private_key not in repr)
+            from watermarks.adamc import _bytes_to_bits
+            wp.reweight.message      = _demo_msg
+            wp.reweight.message_bits = _bytes_to_bits(_demo_msg)
+            wp.reweight.private_key  = _private_key
+            wp.reweight._bit_cursor  = 0
+            wp.reweight._token_position = 0
+
             if hasattr(wp.reweight, "reset_state"):
                 wp.reweight.reset_state()
             (
@@ -795,10 +783,8 @@ def watermark_score_worker(
                 all_extracted_bits,
                 label_attention_mask,
             ) = get_adamc_score_id(
-                vocab_size, output_ids, wp, _adamc_model, device, eps=eps
+                vocab_size, output_ids, wp, adamc_model, device, eps=eps
             )
-            del _adamc_model
-            torch.cuda.empty_cache()
 
             assert label_attention_mask.shape[0] == 1
             label_attention_mask[0, :2] = 0
