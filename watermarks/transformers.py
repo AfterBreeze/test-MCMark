@@ -261,6 +261,12 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             # unshuffle[token_id] = position of token in the shuffled vocab.
             # channel = floor(shuffled_position / (vocab_size / n))
             token = current_token[bsz_idx].item()
+
+            # Skip special tokens that are outside the watermarked vocab range
+            if token >= vocab_size:
+                results.append((bit_index, -1))
+                continue
+
             shuffled_pos = watermark_code.unshuffle[bsz_idx][token].item()
 
             if vocab_size % cur_n == 0:
