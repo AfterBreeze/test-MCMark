@@ -247,51 +247,34 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         assert self.reweight.n == cur_n
         mask = torch.tensor(mask, device=input_ids.device)
 
-        # Generate watermark code in zero-bit mode to recover shuffle and r_t
+        # Generate watermark code in zero-bit mode to recover shuffle, unshuffle, and r_t
         watermark_code = self.reweight.watermark_code_type.from_random(
             rng, vocab_size, cur_n, message_bits=None
         )
-
-        # Build splits
-        if vocab_size % cur_n == 0:
-            splits = (
-                torch.arange(start=0, end=vocab_size)
-                .reshape(cur_n, vocab_size // cur_n)
-                .to(input_ids.device)
-            )
-            use_tensor_splits = True
-        else:
-            splits = []
-            for n_idx in range(cur_n):
-                splits.append(
-                    list(range(
-                        round(vocab_size * n_idx / cur_n),
-                        round(vocab_size * (n_idx + 1) / cur_n),
-                    ))
-                )
-            use_tensor_splits = False
 
         results = []
         for bsz_idx in range(input_ids.shape[0]):
             seed = seeds[bsz_idx]
             bit_index = seed % self.payload_bits  # which bit this token is responsible for
 
-            # Find which channel c the token landed in (using the shuffled space)
-            token = current_token[bsz_idx]
-            c = -1
-            if use_tensor_splits:
+            # Find which channel c the token landed in.
+            # unshuffle[token_id] = position of token in the shuffled vocab.
+            # channel = floor(shuffled_position / (vocab_size / n))
+            token = current_token[bsz_idx].item()
+            shuffled_pos = watermark_code.unshuffle[bsz_idx][token].item()
+
+            if vocab_size % cur_n == 0:
+                c = shuffled_pos // (vocab_size // cur_n)
+            else:
+                # For uneven splits, find which split this position belongs to
+                c = -1
+                start = 0
                 for n_idx in range(cur_n):
-                    if token in watermark_code.shuffle[bsz_idx][splits[n_idx]]:
+                    end = round(vocab_size * (n_idx + 1) / cur_n)
+                    if shuffled_pos < end:
                         c = n_idx
                         break
-            else:
-                shuffled_token_pos = (watermark_code.shuffle[bsz_idx] == token).nonzero(as_tuple=True)[0]
-                if len(shuffled_token_pos) > 0:
-                    pos = shuffled_token_pos[0].item()
-                    for n_idx, split in enumerate(splits):
-                        if pos in range(split[0], split[-1] + 1):
-                            c = n_idx
-                            break
+                    start = end
 
             # Infer the embedded bit: m = (c - r_t) mod n
             r_t = watermark_code.r_t[bsz_idx].item() if watermark_code.r_t is not None else 0
