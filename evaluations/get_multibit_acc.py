@@ -29,9 +29,12 @@ from scipy import stats as scipy_stats
 
 
 def load_wp_from_str(wp_str, payload: bytes, payload_bits: int):
-    """Reconstruct WatermarkLogitsProcessor from its repr string + payload."""
-    import random
-    import copy
+    """Reconstruct WatermarkLogitsProcessor from its repr string + payload.
+    
+    Parses the private_key and n directly from the repr string so that
+    the detector uses exactly the same key as was used during generation.
+    """
+    import re
     from watermarks import (
         WatermarkLogitsProcessor,
         PrevN_ContextCodeExtractor,
@@ -39,19 +42,20 @@ def load_wp_from_str(wp_str, payload: bytes, payload_bits: int):
         MC_Reweight,
     )
 
-    random.seed(42)
-    private_key = random.getrandbits(1024).to_bytes(128, "big")
+    # --- Parse private_key from repr string ---
+    # Format: private_key=b'...' where the bytes are repr'd
+    key_match = re.search(r"private_key=(b'.*?')", wp_str)
+    assert key_match, f"Could not parse private_key from: {wp_str[:80]}"
+    private_key = eval(key_match.group(1))  # safe: only bytes literal
+
+    # --- Parse n from repr string ---
+    n_match = re.search(r"MC_Reweight\(n=(\d+)\)", wp_str)
+    assert n_match, f"Could not find MC_Reweight in: {wp_str}"
+    n = int(n_match.group(1))
 
     watermark_key_list = [
-        NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=False)
+        NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=True)  # ignore_history=True for detection
     ]
-
-    # Extract n from the repr string, e.g. "MC_Reweight(n=4)"
-    import re
-    match = re.search(r"MC_Reweight\(n=(\d+)\)", wp_str)
-    assert match, f"Could not find MC_Reweight in: {wp_str}"
-    n = int(match.group(1))
-
     reweight = MC_Reweight(n)
 
     wp = WatermarkLogitsProcessor(
@@ -82,12 +86,11 @@ def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
     seq_len = output_ids.shape[1]
 
     # Slide over the sequence token by token (starting from position 2 for context)
+    # Note: do NOT reset_watermark_key inside the loop - the NGramHashing already
+    # has ignore_history=True set at construction, so each token is independent.
     for t in range(2, seq_len - 1):
         context = output_ids[:, :t + 1]       # [1, t+1]
         current_token = output_ids[:, t + 1]  # [1]
-
-        wp.reset_watermark_key(1)
-        wp.reweight.ignore_history = True
 
         results = wp.get_multibit_channel(
             context, vocab_size, current_token, cur_n=n_channels
