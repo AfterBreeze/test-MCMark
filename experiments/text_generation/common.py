@@ -134,8 +134,8 @@ def get_wps(reweight_type, model_str):
     # For multi-bit modes, generate a fixed payload (derived from private_key for reproducibility)
     import hashlib
     _payload_hash = hashlib.sha256(private_key).digest()  # 32 bytes = 256 bits
-    multibit_payload = _payload_hash[:4]  # take first 4 bytes = 32 bits
-    PAYLOAD_BITS = 32
+    multibit_payload = _payload_hash[:2]  # take first 2 bytes = 16 bits
+    PAYLOAD_BITS = 16
 
     for wm_key in watermark_key_list:
         for reweight in reweight_list:
