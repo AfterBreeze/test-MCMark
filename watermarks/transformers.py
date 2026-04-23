@@ -37,12 +37,11 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         if payload is not None:
             import numpy as np
             bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
-            # store as LongTensor of shape [payload_bits]
-            self.payload_tensor = torch.tensor(
-                bits[:payload_bits].tolist(), dtype=torch.long
-            )
+            # Store as plain Python list (not tensor) so it's safely picklable
+            # across multiprocessing spawn boundaries without CUDA shared memory issues.
+            self.payload_list = bits[:payload_bits].tolist()
         else:
-            self.payload_tensor = None
+            self.payload_list = None
 
     def __repr__(self):
         watermark_str = ", ".join(
@@ -96,14 +95,15 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         mask = torch.tensor(mask, device=scores.device, dtype=torch.bool)
 
         if isinstance(self.reweight, MC_Reweight):
-            if self.payload_tensor is not None:
+            if self.payload_list is not None:
                 # Multi-bit mode: each token's bit index is derived from its seed
                 # (position-independent: depends on context hash, not absolute position)
-                bit_indices = torch.tensor(
-                    [seed % self.payload_bits for seed in seeds],
+                # Build message_bits on-the-fly from plain Python list (avoids pickle issues)
+                message_bits = torch.tensor(
+                    [self.payload_list[seed % self.payload_bits] for seed in seeds],
                     dtype=torch.long,
+                    device=scores.device,
                 )
-                message_bits = self.payload_tensor[bit_indices].to(scores.device)
                 watermark_code = self.reweight.watermark_code_type.from_random(
                     rng, scores.size(1), self.reweight.n, message_bits=message_bits
                 )
