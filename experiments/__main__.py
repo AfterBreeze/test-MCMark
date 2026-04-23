@@ -75,7 +75,10 @@ def main():
 
     parser.add_argument("--model_str", type=str, help="Model path for text generation.")
     parser.add_argument(
-        "--reweight_type", type=str, choices=["mcmark_ablation", "main_exp", "mcmark"]
+        "--reweight_type", type=str, choices=[
+            "mcmark_ablation", "main_exp", "mcmark",
+            "multibit_mcmark", "multibit_mcmark_ablation",
+        ]
     )
     parser.add_argument("--res_dir", type=str)
     parser.add_argument("--eps", type=float, default=0)
