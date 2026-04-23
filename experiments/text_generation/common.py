@@ -121,8 +121,8 @@ def get_wps(reweight_type, model_str):
     elif reweight_type == "mcmark":
         reweight_list = [MC_Reweight(20)]
     elif reweight_type == "multibit_mcmark":
-        # Multi-bit MCMark: n=4 (2 bits per token), payload_bits=64
-        reweight_list = [MC_Reweight(4)]
+        # Multi-bit MCMark: n=2 (1 bit per token), payload_bits=64
+        reweight_list = [MC_Reweight(2)]
     elif reweight_type == "multibit_mcmark_ablation":
         # Ablation over n values for multi-bit (must be powers of 2 for clean bit encoding)
         reweight_list = [MC_Reweight(2), MC_Reweight(4), MC_Reweight(8)]
