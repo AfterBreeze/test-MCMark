@@ -43,7 +43,6 @@ def load_wp_from_str(wp_str, payload: bytes, payload_bits: int):
     )
 
     # --- Parse private_key from repr string ---
-    # Format: private_key=b'...' where the bytes are repr'd
     key_match = re.search(r"private_key=(b'.*?')", wp_str)
     assert key_match, f"Could not parse private_key from: {wp_str[:80]}"
     private_key = eval(key_match.group(1))  # safe: only bytes literal
@@ -53,8 +52,10 @@ def load_wp_from_str(wp_str, payload: bytes, payload_bits: int):
     assert n_match, f"Could not find MC_Reweight in: {wp_str}"
     n = int(n_match.group(1))
 
+    # Use ignore_history=False to exactly match generation-time behavior:
+    # repeated 2-gram contexts get masked (skipped) during both generation and detection.
     watermark_key_list = [
-        NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=True)  # ignore_history=True for detection
+        NGramHashing(PrevN_ContextCodeExtractor(2), ignore_history=False)
     ]
     reweight = MC_Reweight(n)
 
@@ -74,32 +75,63 @@ def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
     Recover payload bits from a watermarked token sequence.
     Uses majority voting over all token positions.
 
-    Returns:
-        recovered_bits: list of int (0 or 1 for n=2; 0..n-1 for n>2)
-        vote_counts: dict {bit_index: Counter}
+    IMPORTANT: must replay from t=0 with ignore_history=False to match
+    generation-time masking behavior exactly.
     """
     from collections import Counter
 
-    # votes[bit_index] = list of inferred values
     votes = defaultdict(list)
 
     seq_len = output_ids.shape[1]
 
-    # Initialize watermark key history ONCE before the loop
+    # Initialize history ONCE - do NOT reset inside the loop
     wp.reset_watermark_key(1)
 
-    # Slide over the sequence token by token (starting from position 2 for context)
-    # Note: do NOT reset_watermark_key inside the loop - the NGramHashing already
-    # has ignore_history=True set at construction, so each token is independent.
-    for t in range(2, seq_len - 1):
-        context = output_ids[:, :t + 1]       # [1, t+1]
-        current_token = output_ids[:, t + 1]  # [1]
+    # Replay from t=1 (need at least 1 token as context for PrevN(n=2))
+    # The watermark key uses the last 2 tokens as context, so we need t >= 1
+    # to have a valid context of length >= 2.
+    for t in range(1, seq_len - 1):
+        context = output_ids[:, :t + 1]        # [1, t+1], last 2 used as n-gram
+        current_token = output_ids[:, t + 1]   # [1]
 
-        results = wp.get_multibit_channel(
-            context, vocab_size, current_token, cur_n=n_channels
+        # _get_codes internally calls generate_key_and_mask which updates history
+        # and returns mask=True for repeated contexts (skip those tokens)
+        mask, seeds = wp._get_codes(context)
+
+        if mask[0]:
+            # This token was masked during generation (repeated context), skip it
+            continue
+
+        seed = seeds[0]
+        bit_index = seed % payload_bits
+
+        # Now call get_multibit_channel but we already consumed the history state,
+        # so we need to reconstruct r_t and channel from the seed directly
+        import hashlib
+        from watermarks.mcmark import MCMark_WatermarkCode
+        rng = torch.Generator(device=output_ids.device).manual_seed(seed)
+        code = MCMark_WatermarkCode.from_random(
+            [rng], vocab_size, n_channels, message_bits=None
         )
-        bit_index, inferred_bit = results[0]
-        if inferred_bit >= 0:
+
+        token = current_token[0].item()
+        if token >= vocab_size:
+            continue
+
+        shuffled_pos = code.unshuffle[0][token].item()
+        if vocab_size % n_channels == 0:
+            c = shuffled_pos // (vocab_size // n_channels)
+        else:
+            c = -1
+            for n_idx in range(n_channels):
+                end = round(vocab_size * (n_idx + 1) / n_channels)
+                if shuffled_pos < end:
+                    c = n_idx
+                    break
+
+        r_t = code.r_t[0].item()
+        if c >= 0:
+            inferred_bit = (c - r_t) % n_channels
             votes[bit_index].append(inferred_bit)
 
     # Majority vote for each bit position
@@ -108,7 +140,7 @@ def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
         if votes[i]:
             majority = Counter(votes[i]).most_common(1)[0][0]
         else:
-            majority = 0  # default if no votes
+            majority = 0
         recovered_bits.append(majority)
 
     return recovered_bits, dict(votes)
