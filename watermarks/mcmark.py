@@ -12,9 +12,10 @@ import json
 
 
 class MCMark_WatermarkCode(AbstractWatermarkCode):
-    def __init__(self, shuffle: LongTensor, split_k: BoolTensor):
+    def __init__(self, shuffle: LongTensor, split_k: LongTensor, r_t: LongTensor = None):
         self.shuffle = shuffle
         self.split_k = split_k
+        self.r_t = r_t  # base random channel index (used for multi-bit decoding)
         self.unshuffle = torch.argsort(shuffle, dim=-1)
 
     @classmethod
@@ -23,6 +24,7 @@ class MCMark_WatermarkCode(AbstractWatermarkCode):
         rng: Union[torch.Generator, list[torch.Generator]],
         vocab_size: int,
         split_num: int,
+        message_bits: torch.LongTensor = None,  # [bsz] or None for zero-bit mode
     ):
         if isinstance(rng, list):
             batch_size = len(rng)
@@ -32,7 +34,8 @@ class MCMark_WatermarkCode(AbstractWatermarkCode):
                     for i in range(batch_size)
                 ]
             )
-            split_k = torch.cat(
+            # Always generate r_t (base random index) from the RNG
+            r_t = torch.cat(
                 [
                     torch.randint(
                         low=0,
@@ -46,9 +49,15 @@ class MCMark_WatermarkCode(AbstractWatermarkCode):
                 ],
                 dim=0,
             )
+            if message_bits is None:
+                # zero-bit mode: split_k is purely random
+                split_k = r_t
+            else:
+                # multi-bit mode: split_k = (r_t + m) mod n  (unbiased since r_t is uniform)
+                split_k = (r_t + message_bits.to(r_t.device)) % split_num
         else:
             shuffle = torch.randperm(vocab_size, generator=rng, device=rng.device)
-            split_k = torch.randint(
+            r_t = torch.randint(
                 low=0,
                 high=split_num,
                 size=(1,),
@@ -56,7 +65,11 @@ class MCMark_WatermarkCode(AbstractWatermarkCode):
                 device=rng.device,
                 generator=rng,
             )
-        return cls(shuffle, split_k)
+            if message_bits is None:
+                split_k = r_t
+            else:
+                split_k = (r_t + message_bits.to(r_t.device)) % split_num
+        return cls(shuffle, split_k, r_t=r_t)
 
 
 class MC_Reweight(AbstractReweight):

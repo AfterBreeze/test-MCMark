@@ -120,18 +120,33 @@ def get_wps(reweight_type, model_str):
         reweight_list = [MC_Reweight(n) for n in n_list[model_str]]
     elif reweight_type == "mcmark":
         reweight_list = [MC_Reweight(20)]
+    elif reweight_type == "multibit_mcmark":
+        # Multi-bit MCMark: n=4 (2 bits per token), payload_bits=64
+        reweight_list = [MC_Reweight(4)]
+    elif reweight_type == "multibit_mcmark_ablation":
+        # Ablation over n values for multi-bit (must be powers of 2 for clean bit encoding)
+        reweight_list = [MC_Reweight(2), MC_Reweight(4), MC_Reweight(8)]
     else:
         raise ValueError(f"Unknown reweight_type: {reweight_type}")
 
     wm_wps = []
 
+    # For multi-bit modes, generate a fixed payload (derived from private_key for reproducibility)
+    import hashlib
+    _payload_hash = hashlib.sha256(private_key).digest()  # 32 bytes = 256 bits
+    multibit_payload = _payload_hash[:8]  # take first 8 bytes = 64 bits
+    PAYLOAD_BITS = 64
+
     for wm_key in watermark_key_list:
         for reweight in reweight_list:
+            is_multibit = reweight_type.startswith("multibit")
             wm_wps.append(
                 WatermarkLogitsProcessor(
                     private_key,
                     reweight=copy.deepcopy(reweight),
                     watermark_key_list=[copy.deepcopy(wm_key)],
+                    payload=multibit_payload if is_multibit else None,
+                    payload_bits=PAYLOAD_BITS,
                 )
             )
 
@@ -386,6 +401,7 @@ def transformer_worker(
                 outputs_ids, skip_special_tokens=True
             )
             wp_str = repr(wp)
+            payload_hex = wp.payload.hex() if wp.payload is not None else None
             rq.put(
                 {
                     "output": outputs,
@@ -393,6 +409,7 @@ def transformer_worker(
                     "output_ids": outputs_ids.tolist(),
                     "id": batch["id"],
                     "watermark_processor": [wp_str] * len(outputs),
+                    "payload_hex": [payload_hex] * len(outputs),
                 }
             )
 

@@ -25,17 +25,31 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         private_key: any,
         reweight: AbstractReweight,  # sample strategy
         watermark_key_list: List[AbstractWatermarkKey],
+        payload: bytes = None,    # optional: raw payload bytes for multi-bit mode
+        payload_bits: int = 64,   # number of payload bits to embed
     ):
         self.watermark_key_list = watermark_key_list
         self.private_key = private_key
         self.reweight = reweight
+        self.payload = payload
+        self.payload_bits = payload_bits
+
+        if payload is not None:
+            import numpy as np
+            bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
+            # store as LongTensor of shape [payload_bits]
+            self.payload_tensor = torch.tensor(
+                bits[:payload_bits].tolist(), dtype=torch.long
+            )
+        else:
+            self.payload_tensor = None
 
     def __repr__(self):
         watermark_str = ", ".join(
             [repr(watermark_key) for watermark_key in self.watermark_key_list]
         )
 
-        res_str = f"WatermarkLogitsProcessor(private_key={repr(self.private_key)}, reweight={repr(self.reweight)}, watermark_key_list=[{watermark_str}])"
+        res_str = f"WatermarkLogitsProcessor(private_key={repr(self.private_key)}, reweight={repr(self.reweight)}, watermark_key_list=[{watermark_str}], payload_bits={self.payload_bits})"
 
         return res_str
 
@@ -82,9 +96,22 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         mask = torch.tensor(mask, device=scores.device, dtype=torch.bool)
 
         if isinstance(self.reweight, MC_Reweight):
-            watermark_code = self.reweight.watermark_code_type.from_random(
-                rng, scores.size(1), self.reweight.n
-            )
+            if self.payload_tensor is not None:
+                # Multi-bit mode: each token's bit index is derived from its seed
+                # (position-independent: depends on context hash, not absolute position)
+                bit_indices = torch.tensor(
+                    [seed % self.payload_bits for seed in seeds],
+                    dtype=torch.long,
+                )
+                message_bits = self.payload_tensor[bit_indices].to(scores.device)
+                watermark_code = self.reweight.watermark_code_type.from_random(
+                    rng, scores.size(1), self.reweight.n, message_bits=message_bits
+                )
+            else:
+                # Zero-bit mode (original behavior)
+                watermark_code = self.reweight.watermark_code_type.from_random(
+                    rng, scores.size(1), self.reweight.n
+                )
         else:
             watermark_code = self.reweight.watermark_code_type.from_random(
                 rng, scores.size(1)
@@ -199,6 +226,83 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             else:
                 scores.append(0)
         return scores
+
+    def get_multibit_channel(
+        self, input_ids: LongTensor, vocab_size, current_token, cur_n, debug=False
+    ):
+        """
+        Multi-bit detection: for each token, infer which payload bit was embedded
+        and what value it takes.
+
+        Returns:
+            list of (bit_index, inferred_bit_value) tuples, one per batch element.
+            bit_index: which payload bit this token position is responsible for
+            inferred_bit_value: inferred value (0 to cur_n-1) of that bit
+        """
+        mask, seeds = self._get_codes(input_ids)
+        rng = [
+            torch.Generator(device=input_ids.device).manual_seed(seed) for seed in seeds
+        ]
+        assert isinstance(self.reweight, MC_Reweight)
+        assert self.reweight.n == cur_n
+        mask = torch.tensor(mask, device=input_ids.device)
+
+        # Generate watermark code in zero-bit mode to recover shuffle and r_t
+        watermark_code = self.reweight.watermark_code_type.from_random(
+            rng, vocab_size, cur_n, message_bits=None
+        )
+
+        # Build splits
+        if vocab_size % cur_n == 0:
+            splits = (
+                torch.arange(start=0, end=vocab_size)
+                .reshape(cur_n, vocab_size // cur_n)
+                .to(input_ids.device)
+            )
+            use_tensor_splits = True
+        else:
+            splits = []
+            for n_idx in range(cur_n):
+                splits.append(
+                    list(range(
+                        round(vocab_size * n_idx / cur_n),
+                        round(vocab_size * (n_idx + 1) / cur_n),
+                    ))
+                )
+            use_tensor_splits = False
+
+        results = []
+        for bsz_idx in range(input_ids.shape[0]):
+            seed = seeds[bsz_idx]
+            bit_index = seed % self.payload_bits  # which bit this token is responsible for
+
+            # Find which channel c the token landed in (using the shuffled space)
+            token = current_token[bsz_idx]
+            c = -1
+            if use_tensor_splits:
+                for n_idx in range(cur_n):
+                    if token in watermark_code.shuffle[bsz_idx][splits[n_idx]]:
+                        c = n_idx
+                        break
+            else:
+                shuffled_token_pos = (watermark_code.shuffle[bsz_idx] == token).nonzero(as_tuple=True)[0]
+                if len(shuffled_token_pos) > 0:
+                    pos = shuffled_token_pos[0].item()
+                    for n_idx, split in enumerate(splits):
+                        if pos in range(split[0], split[-1] + 1):
+                            c = n_idx
+                            break
+
+            # Infer the embedded bit: m = (c - r_t) mod n
+            r_t = watermark_code.r_t[bsz_idx].item() if watermark_code.r_t is not None else 0
+            if c == -1:
+                inferred_bit = -1  # failed to find channel
+            else:
+                inferred_bit = (c - r_t) % cur_n
+
+            results.append((bit_index, inferred_bit))
+
+        return results
 
 
 class WatermarkLogitsProcessor_Baseline(LogitsProcessor):
