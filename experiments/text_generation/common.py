@@ -401,7 +401,12 @@ def transformer_worker(
                 outputs_ids, skip_special_tokens=True
             )
             wp_str = repr(wp)
-            payload_hex = wp.payload.hex() if wp.payload is not None else None
+            payload_hex = wp.payload if wp.payload is not None else None
+            # Store the last 2 prompt token ids so detection can reconstruct
+            # the correct n-gram context for the first output tokens
+            prompt_input_ids = tbatch["input"]["input_ids"]
+            prompt_tail = prompt_input_ids[:, -2:].tolist()  # [[tok_a, tok_b], ...]
+
             rq.put(
                 {
                     "output": outputs,
@@ -409,7 +414,8 @@ def transformer_worker(
                     "output_ids": outputs_ids.tolist(),
                     "id": batch["id"],
                     "watermark_processor": [wp_str] * len(outputs),
-                    "payload_hex": [payload_hex] * len(outputs),
+                    "payload_hex": [payload_hex.hex() if payload_hex else None] * len(outputs),
+                    "prompt_tail_ids": [prompt_tail[i] for i in range(len(outputs))],
                 }
             )
 

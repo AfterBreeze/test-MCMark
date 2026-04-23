@@ -70,49 +70,56 @@ def load_wp_from_str(wp_str, payload: bytes, payload_bits: int):
 
 
 def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
-                              n_channels: int, payload_bits: int):
+                              n_channels: int, payload_bits: int,
+                              prompt_tail_ids: list = None):
     """
     Recover payload bits from a watermarked token sequence.
-    Uses majority voting over all token positions.
 
-    IMPORTANT: must replay from t=0 with ignore_history=False to match
-    generation-time masking behavior exactly.
+    prompt_tail_ids: the last 2 token ids of the prompt (list of 2 ints).
+    These are needed to reconstruct the correct n-gram context for the
+    first output tokens, matching generation-time behavior exactly.
     """
     from collections import Counter
 
     votes = defaultdict(list)
 
-    seq_len = output_ids.shape[1]
+    # Prepend prompt tail so context hashes match generation time
+    if prompt_tail_ids is not None and len(prompt_tail_ids) > 0:
+        prefix = torch.tensor([prompt_tail_ids], dtype=torch.long, device=output_ids.device)
+        full_ids = torch.cat([prefix, output_ids], dim=1)
+        offset = len(prompt_tail_ids)  # output starts at this index in full_ids
+    else:
+        full_ids = output_ids
+        offset = 0
 
-    # Initialize history ONCE - do NOT reset inside the loop
+    seq_len = full_ids.shape[1]
+
+    # Initialize history ONCE before the loop
     wp.reset_watermark_key(1)
 
-    # Replay from t=1 (need at least 1 token as context for PrevN(n=2))
-    # The watermark key uses the last 2 tokens as context, so we need t >= 1
-    # to have a valid context of length >= 2.
+    # We need to replay from t=1 within full_ids so history accumulates correctly.
+    # Tokens we actually want to score are those with index >= offset in full_ids
+    # (i.e., the actual output tokens).
     for t in range(1, seq_len - 1):
-        context = output_ids[:, :t + 1]        # [1, t+1], last 2 used as n-gram
-        current_token = output_ids[:, t + 1]   # [1]
+        context = full_ids[:, :t + 1]
+        current_token = full_ids[:, t + 1]
 
-        # _get_codes internally calls generate_key_and_mask which updates history
-        # and returns mask=True for repeated contexts (skip those tokens)
         mask, seeds = wp._get_codes(context)
 
         if mask[0]:
-            # This token was masked during generation (repeated context), skip it
-            continue
+            continue  # repeated context, was masked during generation too
+
+        # Only collect votes for actual output tokens (not prompt tail)
+        if t + 1 < offset:
+            continue  # this is still in the prompt tail, skip
 
         seed = seeds[0]
         bit_index = seed % payload_bits
+        embedded_bit = wp.payload_list[bit_index] if wp.payload_list else 0
 
-        # Now call get_multibit_channel but we already consumed the history state,
-        # so we need to reconstruct r_t and channel from the seed directly
-        import hashlib
         from watermarks.mcmark import MCMark_WatermarkCode
-        rng = torch.Generator(device=output_ids.device).manual_seed(seed)
-        code = MCMark_WatermarkCode.from_random(
-            [rng], vocab_size, n_channels, message_bits=None
-        )
+        rng = torch.Generator(device=full_ids.device).manual_seed(seed)
+        code = MCMark_WatermarkCode.from_random([rng], vocab_size, n_channels, message_bits=None)
 
         token = current_token[0].item()
         if token >= vocab_size:
@@ -134,7 +141,6 @@ def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
             inferred_bit = (c - r_t) % n_channels
             votes[bit_index].append(inferred_bit)
 
-    # Majority vote for each bit position
     recovered_bits = []
     for i in range(payload_bits):
         if votes[i]:
@@ -221,8 +227,12 @@ def main():
 
         wp.payload_bits = args.payload_bits
 
+        # Get prompt tail for correct context reconstruction
+        prompt_tail_ids = record.get("prompt_tail_ids", None)
+
         recovered_bits, votes = recover_payload_from_ids(
-            output_ids, wp, vocab_size, args.n_channels, args.payload_bits
+            output_ids, wp, vocab_size, args.n_channels, args.payload_bits,
+            prompt_tail_ids=prompt_tail_ids,
         )
 
         acc = compute_bit_accuracy(recovered_bits, ground_truth_bits_np, args.n_channels)
