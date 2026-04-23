@@ -85,6 +85,9 @@ def recover_payload_from_ids(output_ids: torch.LongTensor, wp, vocab_size: int,
 
     seq_len = output_ids.shape[1]
 
+    # Initialize watermark key history ONCE before the loop
+    wp.reset_watermark_key(1)
+
     # Slide over the sequence token by token (starting from position 2 for context)
     # Note: do NOT reset_watermark_key inside the loop - the NGramHashing already
     # has ignore_history=True set at construction, so each token is independent.
