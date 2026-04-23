@@ -180,10 +180,11 @@ def main():
     device = f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu"
 
     # Load model just to get vocab_size (no need to run inference)
-    from transformers import AutoTokenizer
+    from transformers import AutoTokenizer, AutoConfig
     tokenizer = AutoTokenizer.from_pretrained(args.model_str)
-    vocab_size = tokenizer.vocab_size
-    print(f"Vocab size: {vocab_size}")
+    config = AutoConfig.from_pretrained(args.model_str)
+    vocab_size = config.vocab_size  # use model config vocab_size, NOT tokenizer.vocab_size
+    print(f"Vocab size (model config): {vocab_size}")
 
     # Load data
     with open(args.input_file, "r") as f:
