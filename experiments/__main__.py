@@ -78,18 +78,23 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--model_str", type=str, help="Model path for text generation.")
+    parser.add_argument(
+        "--model_str", type=str,
+        default="meta-llama/Llama-3.2-3B-Instruct",
+        help="Model path for text generation.",
+    )
     parser.add_argument(
         "--reweight_type", type=str, choices=[
             "mcmark_ablation", "main_exp", "mcmark",
             "multibit_mcmark", "multibit_mcmark_ablation",
         ]
     )
-    parser.add_argument("--res_dir", type=str)
+    parser.add_argument("--res_dir", type=str, default="./results")
     parser.add_argument("--eps", type=float, default=0)
     parser.add_argument(
         "--dataset_name",
         type=str,
+        default="mmw_book_report",
         help="Dataset name for text generation",
         choices=[
             "mmw_book_report",
