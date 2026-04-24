@@ -1,4 +1,4 @@
-def undetectable_exp_pipeline(output_path, model_str, reweight_type, dataset_name):
+def undetectable_exp_pipeline(output_path, model_str, reweight_type, dataset_name, payload_bits=None):
     from .common import set_spawn
 
     set_spawn()
@@ -28,6 +28,7 @@ def undetectable_exp_pipeline(output_path, model_str, reweight_type, dataset_nam
             "dataset_name": dataset_name,
             "model_str": model_str,
             "batch_size": 1,
+            "payload_bits": payload_bits,
         },
     )
     gpu_workers = [

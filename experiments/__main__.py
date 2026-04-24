@@ -2,7 +2,8 @@ import os
 
 
 def text_generation_undetectable_exp(
-    res_dir, eps, model_str, reweight_type, dataset_name, robustness_type
+    res_dir, eps, model_str, reweight_type, dataset_name, robustness_type,
+    payload_bits=None,
 ):
     from . import text_generation as tg
 
@@ -14,9 +15,12 @@ def text_generation_undetectable_exp(
     )
     os.makedirs(sub_dir, exist_ok=True)
 
+    # Determine file suffix based on payload_bits (only for multibit modes)
+    bits_suffix = f"_{payload_bits}" if payload_bits is not None else ""
+
     if robustness_type is None:  # not a robustness experiment
-        output_path = os.path.join(sub_dir, "text_generation.txt")
-        score_save_path = os.path.join(sub_dir, "score.txt")
+        output_path = os.path.join(sub_dir, f"text_generation{bits_suffix}.txt")
+        score_save_path = os.path.join(sub_dir, f"score{bits_suffix}.txt")
         if not os.path.exists(output_path):
             print("tg.get_output.undetectable_exp_pipeline()", flush=True)
             tg.get_output.undetectable_exp_pipeline(
@@ -24,28 +28,29 @@ def text_generation_undetectable_exp(
                 model_str=model_str,
                 reweight_type=reweight_type,
                 dataset_name=dataset_name,
+                payload_bits=payload_bits,
             )
         else:
             print(output_path, " exists! Job skipped.")
 
     elif robustness_type == "random_token_replacement":
-        output_path = os.path.join(sub_dir, "text_generation.txt")
+        output_path = os.path.join(sub_dir, f"text_generation{bits_suffix}.txt")
         assert os.path.exists(output_path)
         eps_str = str(eps).replace(".", "_")
         score_save_path = os.path.join(
-            sub_dir, f"score_random_token_replacement_eps_{eps_str}.txt"
+            sub_dir, f"score{bits_suffix}_random_token_replacement_eps_{eps_str}.txt"
         )
     elif robustness_type == "gpt_rephrase":
-        output_path = os.path.join(sub_dir, "text_generation_gpt_rephrase.txt")
-        score_save_path = os.path.join(sub_dir, "score_gpt_rephrase.txt")
+        output_path = os.path.join(sub_dir, f"text_generation{bits_suffix}_gpt_rephrase.txt")
+        score_save_path = os.path.join(sub_dir, f"score{bits_suffix}_gpt_rephrase.txt")
         assert os.path.exists(output_path)
     elif robustness_type == "back_translation":
-        output_path = os.path.join(sub_dir, "text_generation_back_translation.txt")
-        score_save_path = os.path.join(sub_dir, "score_back_translation.txt")
+        output_path = os.path.join(sub_dir, f"text_generation{bits_suffix}_back_translation.txt")
+        score_save_path = os.path.join(sub_dir, f"score{bits_suffix}_back_translation.txt")
         assert os.path.exists(output_path)
     elif robustness_type == "dipper":
-        output_path = os.path.join(sub_dir, "text_generation_dipper.txt")
-        score_save_path = os.path.join(sub_dir, "score_gpt_dipper.txt")
+        output_path = os.path.join(sub_dir, f"text_generation{bits_suffix}_dipper.txt")
+        score_save_path = os.path.join(sub_dir, f"score{bits_suffix}_gpt_dipper.txt")
         assert os.path.exists(output_path)
     else:
         raise ValueError(f"Unknown robustness type: {robustness_type}")
@@ -105,6 +110,13 @@ def main():
             "back_translation",
         ],
     )
+    parser.add_argument(
+        "--payload_bits",
+        type=int,
+        default=None,
+        help="Number of bits to embed (only for multibit_mcmark modes). "
+             "Affects output filename suffix, e.g. text_generation_32.txt",
+    )
     args = parser.parse_args()
 
     text_generation_undetectable_exp(
@@ -114,6 +126,7 @@ def main():
         reweight_type=args.reweight_type,
         dataset_name=args.dataset_name,
         robustness_type=args.robustness_type,
+        payload_bits=args.payload_bits,
     )
 
 

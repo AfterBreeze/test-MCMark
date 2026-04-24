@@ -1,4 +1,4 @@
-def get_wps(reweight_type, model_str):
+def get_wps(reweight_type, model_str, payload_bits=None):
     from watermarks import (
         WatermarkLogitsProcessor,
         PrevN_ContextCodeExtractor,
@@ -134,8 +134,10 @@ def get_wps(reweight_type, model_str):
     # For multi-bit modes, generate a fixed payload (derived from private_key for reproducibility)
     import hashlib
     _payload_hash = hashlib.sha256(private_key).digest()  # 32 bytes = 256 bits
-    multibit_payload = _payload_hash[:8]  # take first 8 bytes = 64 bits
-    PAYLOAD_BITS = 64
+    # Determine effective payload_bits: caller can override, default 64
+    _payload_bits = payload_bits if payload_bits is not None else 64
+    multibit_payload = _payload_hash[:(_payload_bits + 7) // 8]  # ceil(bits/8) bytes
+    PAYLOAD_BITS = _payload_bits
 
     for wm_key in watermark_key_list:
         for reweight in reweight_list:
@@ -173,13 +175,13 @@ def get_num_gpus():
 
 
 def batched_wp_task_worker(
-    tq, get_in_ds, reweight_type, dataset_name, model_str, batch_size=8
+    tq, get_in_ds, reweight_type, dataset_name, model_str, batch_size=8, payload_bits=None
 ):
     ds = get_in_ds(dataset_name=dataset_name)
 
     from .common import get_wps
 
-    wps = get_wps(reweight_type=reweight_type, model_str=model_str)
+    wps = get_wps(reweight_type=reweight_type, model_str=model_str, payload_bits=payload_bits)
 
     from tqdm import tqdm
 
