@@ -126,6 +126,14 @@ def get_wps(reweight_type, model_str, payload_bits=None):
     elif reweight_type == "multibit_mcmark_ablation":
         # Ablation over n values for multi-bit (must be powers of 2 for clean bit encoding)
         reweight_list = [MC_Reweight(2), MC_Reweight(4), MC_Reweight(8)]
+    elif reweight_type == "mcmark_rbr":
+        # MCMark-RBR: Multi-Layer Random Bit Routing with MCCR
+        from watermarks.mcmark_rbr import MC_RBR_Reweight
+        reweight_list = [MC_RBR_Reweight(num_layers=10, n=2)]
+    elif reweight_type == "mcmark_rbr_ablation":
+        # Ablation over num_layers for MCMark-RBR
+        from watermarks.mcmark_rbr import MC_RBR_Reweight
+        reweight_list = [MC_RBR_Reweight(num_layers=l, n=2) for l in [1, 3, 5, 10, 20]]
     else:
         raise ValueError(f"Unknown reweight_type: {reweight_type}")
 
@@ -141,7 +149,7 @@ def get_wps(reweight_type, model_str, payload_bits=None):
 
     for wm_key in watermark_key_list:
         for reweight in reweight_list:
-            is_multibit = reweight_type.startswith("multibit")
+        is_multibit = reweight_type.startswith("multibit") or reweight_type.startswith("mcmark_rbr")
             wm_wps.append(
                 WatermarkLogitsProcessor(
                     private_key,

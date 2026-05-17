@@ -4,6 +4,7 @@
 from .base import *
 from .dipmark import Dipmark_WatermarkCode, Dip_Reweight
 from .mcmark import MC_Reweight, MCMark_WatermarkCode
+from .mcmark_rbr import MC_RBR_Reweight, MCMarkRBR_WatermarkCode
 from .sta import STA_Reweight, STA_WatermarkCode
 from .unigram import Unigram_Reweight, Unigram_WatermarkCode
 

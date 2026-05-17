@@ -14,6 +14,7 @@ from .base import (
 from typing import List
 from .dipmark import Dip_Reweight
 from .mcmark import MC_Reweight
+from .mcmark_rbr import MC_RBR_Reweight, MCMarkRBR_WatermarkCode
 from .sta import STA_Reweight
 from .unigram import Unigram_Reweight
 import json
@@ -94,6 +95,11 @@ class WatermarkLogitsProcessor(LogitsProcessor):
         ]
         mask = torch.tensor(mask, device=scores.device, dtype=torch.bool)
 
+        if isinstance(self.reweight, MC_RBR_Reweight):
+            # MCMark-RBR: multi-layer Random Bit Routing with MCCR
+            reweighted_scores = self._core_rbr_layers(seeds, scores)
+            return mask, reweighted_scores
+
         if isinstance(self.reweight, MC_Reweight):
             if self.payload_list is not None:
                 # Multi-bit mode: each token's bit index is derived from its seed
@@ -118,6 +124,52 @@ class WatermarkLogitsProcessor(LogitsProcessor):
             )
         reweighted_scores = self.reweight.reweight_logits(watermark_code, scores)
         return mask, reweighted_scores
+
+    def _core_rbr_layers(self, seeds: list, scores: FloatTensor) -> FloatTensor:
+        """
+        Multi-Layer Sequential Reweighting for MCMark-RBR.
+
+        For each layer j in [0, num_layers):
+            1. Derive a layer-specific seed by XOR-ing the context seed with a
+               layer-dependent constant (keeps the context hash structure).
+            2. Generate MCMarkRBR_WatermarkCode from the layer seed:
+               - shuffle, r_t from RNG
+               - aux from RNG → bit_index = aux % payload_bits, mask_h = (aux>>17)&1
+               - split_k = (r_t + payload[bit_index] XOR mask_h) % n
+            3. Apply single-layer MCCR reweighting on top of previous distribution.
+
+        Returns the final reweighted logits after all layers.
+        """
+        assert isinstance(self.reweight, MC_RBR_Reweight)
+        num_layers = self.reweight.num_layers
+        n = self.reweight.n
+        vocab_size = scores.size(1)
+        device = scores.device
+
+        current_scores = scores
+        for layer in range(num_layers):
+            # Layer-specific seeds: XOR with a large prime scaled by layer to ensure
+            # independence while remaining deterministic and reproducible
+            layer_seeds = [
+                (seed ^ (layer * 0x9E3779B9 + 0x6C62272E)) & 0xFFFFFFFF
+                for seed in seeds
+            ]
+            layer_rngs = [
+                torch.Generator(device=device).manual_seed(ls)
+                for ls in layer_seeds
+            ]
+
+            wm_code = MCMarkRBR_WatermarkCode.from_random(
+                rng=layer_rngs,
+                vocab_size=vocab_size,
+                split_num=n,
+                payload_bits=self.payload_bits,
+                payload_list=self.payload_list,
+                layer_idx=layer,
+            )
+            current_scores = self.reweight.reweight_logits(wm_code, current_scores)
+
+        return current_scores
 
     def __call__(self, input_ids: LongTensor, scores: FloatTensor) -> FloatTensor:
         mask, reweighted_scores = self._core(input_ids, scores)
