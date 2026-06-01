@@ -87,6 +87,7 @@ def main():
         "--reweight_type", type=str, choices=[
             "mcmark_ablation", "main_exp", "mcmark",
             "multibit_mcmark", "multibit_mcmark_ablation",
+            "mcmark_rbr", "mcmark_rbr_ablation",
         ]
     )
     parser.add_argument("--res_dir", type=str, default="./results")
