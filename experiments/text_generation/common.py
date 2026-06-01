@@ -149,7 +149,7 @@ def get_wps(reweight_type, model_str, payload_bits=None):
 
     for wm_key in watermark_key_list:
         for reweight in reweight_list:
-        is_multibit = reweight_type.startswith("multibit") or reweight_type.startswith("mcmark_rbr")
+            is_multibit = reweight_type.startswith("multibit") or reweight_type.startswith("mcmark_rbr")
             wm_wps.append(
                 WatermarkLogitsProcessor(
                     private_key,
